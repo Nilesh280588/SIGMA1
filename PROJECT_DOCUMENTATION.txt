@@ -1,0 +1,492 @@
+═══════════════════════════════════════════════════════════════════════════════
+ SIGMA — SEIZURE INTELLIGENCE & GROWTH MANAGEMENT AGENT
+ (Intelligent Patient Journey Analyser & Pharma Strategy Agent)
+ Complete Implementation Documentation
+═══════════════════════════════════════════════════════════════════════════════
+ Version : 3.0 (Agentic, Claude-powered, dashboard-grade interactivity)
+ Stack   : Python · Streamlit · Plotly · Anthropic Claude API · SQL Server
+           (SSMS, live only — no local fallback) · pyodbc
+ Identity: OUR COMPANY = EISAI (hero brands BANZEL, FYCOMPA).
+           Competitors: Epidiolex (Jazz), Onfi (Lundbeck), Xcopri (SK Life
+           Science), plus branded/generic makers grouped as OTHERS
+           (incl. Keppra, Vimpat, Briviact, Fintepla, Nayzilam).
+ Cohort  : US EPILEPSY patients (incl. Lennox-Gastaut Syndrome), grouped by
+           seizure duration (context) and age band (sub-context).
+═══════════════════════════════════════════════════════════════════════════════
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 1. VISION — WHY THIS IS NOT A DASHBOARD
+───────────────────────────────────────────────────────────────────────────────
+Classic pharma dashboards show WHAT happened (graphs, KPIs). A pharma company
+does not earn money from graphs — it earns from DECISIONS and ACTIONS taken on
+time: finding the undiagnosed patient, restarting the discontinued therapy,
+recovering the denied claim, moving marketing money to the state where it works.
+
+This project therefore has three layers on every screen:
+
+   LAYER 1 — SEE       : live analytics from the SSMS database (charts, KPIs),
+                         now with Power-BI-style interactivity (see §4.0)
+   LAYER 2 — UNDERSTAND: Claude reads the SAME live data (including the user's
+                         active filters) and explains what it means for the
+                         business (insight, risk, $ opportunity)
+   LAYER 3 — ACT       : Claude proposes 2–3 alternative concrete actions
+                         (patient-level AND business-level). A human approves →
+                         the system EXECUTES the action (appointment,
+                         notification/email, test order, internal task) and
+                         audit-logs everything.
+
+Guiding principles implemented everywhere:
+  • NOTHING is hard-coded — no fake insights, no fixed numbers, no embedded API
+    key. Every number is computed live from the DB, every insight is generated
+    by the Claude model at runtime, every credential comes from .env.
+  • HUMAN-IN-THE-LOOP — the AI can only PROPOSE; execution requires approval
+    (except explicitly LOW-risk actions under Autonomous Mode — see §8A).
+  • PRIVACY BY DESIGN — patient identity = patient_id ONLY (no name columns
+    exist in the data). Physician names ARE used (commercial targeting).
+  • AUDIT EVERYTHING — every proposal, approval, rejection, execution and
+    notification is written to an audit log. ALL timestamps are stored and
+    displayed in UTC (SYSUTCDATETIME), labeled "(UTC)" in the UI.
+  • PLAIN LANGUAGE — every chart carries a caption a non-medical business
+    reader understands; the AI is instructed to explain jargon inline.
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 2. ARCHITECTURE & FILE MAP
+───────────────────────────────────────────────────────────────────────────────
+
+   ┌──────────────────────────── app.py (UI) ─────────────────────────────┐
+   │ 8 pages · SIGMA branding · date slicers · click cross-filters ·      │
+   │ Opportunity Cards · Action Center · chat                             │
+   └──────┬───────────────┬───────────────────┬───────────────────────────┘
+          │               │                   │
+   backend.py        ai_engine.py         agent.py
+   (analytics SQL,   (page insights,      (chat agent: writes its own T-SQL,
+    date-filterable)  structured JSON)     proposes actions via tool-use)
+          │               │                   │
+          └───────┬───────┴───────┬───────────┘
+                  │               │
+                db.py         actions.py          agent_watchdog.py
+   (SQL Server access,        (executors, queue,  (always-on reflex layer:
+    UTC timestamps,            notifications,      safety / denials /
+    agent tables)              audit)              untreated → Autopilot)
+
+   config.py     — loads .env (API key, model, DB, SMTP). Zero hard-coding.
+   scheduler.py  — daily 08:00 autonomous cycle (watchdog + Claude deep scan).
+   test_connection.py — pre-flight SSMS check (drivers → connect → tables).
+
+ FILE-BY-FILE, WHAT AND WHY:
+
+ config.py
+   WHAT: tiny .env loader (no external dependency): ANTHROPIC_API_KEY,
+         CLAUDE_MODEL, DB_SERVER, DB_NAME, DB_TRUSTED_CONNECTION,
+         DB_USERNAME/PASSWORD, SMTP_*.
+   WHY : one switch point — rotating the key or repointing the DB is a .env
+         edit, never a code change.
+
+ db.py
+   WHAT: pyodbc connection factory (tries ODBC Driver 18 → 17 → legacy);
+         run_query()/execute()/scalar(); T-SQL helpers; ensure_agent_tables()
+         auto-creates the 6 agent-operational tables; audit(); save/load_chat.
+         sql_now() = SYSUTCDATETIME() — every operational timestamp is UTC,
+         written EXPLICITLY on each insert (not left to column defaults).
+   WHY : SSMS is the single source of truth; anything added in SSMS appears in
+         the app on refresh. UTC guarantees consistent timestamps regardless
+         of server timezone or who (human/agent) performed the action.
+
+ backend.py
+   WHAT: all page analytics as parameterised T-SQL (KPIs, funnel, delays,
+         suspects, untreated, payer denials, switch flow, geo, physician
+         performance, manufacturer mix). EVERY function accepts optional
+         (d1, d2) date bounds — this is what makes the per-section date
+         slicers filter every chart. get_date_bounds() feeds the sliders.
+         OUR_MFR = 'EISAI' drives all "our company" logic.
+   WHY : deterministic, fast, testable queries; the AI layers consume the
+         OUTPUT of these queries so insights are grounded in exactly what the
+         user currently sees (filters included).
+
+ ai_engine.py
+   WHAT: Claude client; INSIGHT_SCHEMA (strict JSON schema for opportunity
+         cards); generate_page_insight(page, live_data) → validated JSON.
+         System prompt carries the EISAI identity, the plain-language rule,
+         and the privacy rule.
+   WHY : structured outputs (json_schema) guarantee the model's answer is
+         machine-executable — each option carries action_type + targets, so a
+         click can execute it. No fragile text parsing.
+
+ agent.py
+   WHAT: the conversational tool-use agent. Tools: query_database (SELECT-only,
+         write/DDL keyword blocklist, 200-row cap), propose_action
+         (patient-level), propose_business_action (company-level). Manual
+         agentic loop (up to 12 steps). The schema prompt describes all 18
+         real tables (space-named, [bracketed]) and the epilepsy cohort
+         definitions. run_autopilot_scan() = one "sweep everything" mission.
+         Chat history persists in Agent_Chat_History across restarts.
+   WHY : tool use lets Claude decide WHAT data it needs and fetch it itself.
+         The manual loop is deliberate: it gates every side-effecting call,
+         counts proposals, and enforces the read-only SQL policy.
+
+ actions.py
+   WHAT: the "hands". Patient executors (schedule_appointment,
+         send_notification, order_diagnostic_test, change_prescription,
+         escalate_claim, enroll_support_program, refer_to_specialist);
+         business executors (marketing budget, field reps, physician
+         education, payer negotiation, screening campaign, center
+         partnership); approval-queue CRUD; execute_option_steps() for
+         playbooks; RISK_TIERS policy; rejection memory (30-day no-re-propose);
+         value metrics; SMTP email (real if configured, else simulated+logged).
+   WHY : separation of proposal and execution is the safety model.
+
+ agent_watchdog.py
+   WHAT: rule-based reflex layer that runs by itself on every app start (and
+         from scheduler.py): 1) HIGH-severity side effects with no follow-up,
+         2) denied claims not yet escalated (highest $ first), 3) diagnosed-
+         but-untreated epilepsy patients. Max 5 proposals/category/sweep.
+   WHY : instant, deterministic detection that shouldn't wait for a human to
+         open a page — and the entry point for risk-tiered autonomy.
+
+ app.py
+   WHAT: Streamlit UI. SIGMA brand (inline SVG logo: Σ badge, EEG pulse,
+         medical cross; gradient wordmark). 8 pages; reusable dashboard
+         machinery (§4.0); render_ai_panel() opportunity cards with
+         approve/queue-and-dismiss behavior; Action Center. A self-heal
+         guard at the top reloads stale in-memory modules after code updates
+         (Streamlit hot-reloads app.py but not imported modules).
+
+ scheduler.py
+   WHAT: python scheduler.py (daily 08:00) or --once. Runs watchdog sweep
+         (auto_execute=True) + Claude deep scan; prints an executive report.
+
+ test_connection.py
+   WHAT: standalone pre-flight: lists ODBC drivers → connects → lists tables →
+         row counts → creates agent tables. Run BEFORE first app start.
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 3. DATA MODEL (REAL SSMS TABLES — names contain spaces, always [bracketed])
+───────────────────────────────────────────────────────────────────────────────
+ DIMENSIONS
+   [PTNT DIM]   PATIENT_ID, PATIENT_BIRTH_YEAR, PATIENT_GENDER (1=M,2=F),
+                PATIENT_ZIP3, PATIENT_STATE   (18 US states, 2-letter codes)
+   [DRUG DIM]   DRUG_ID, NDC11, DRUG_NAME, BGI (B/G), BB_USC_CODE/NAME
+                (therapeutic class), MANUFACTURER, strength/form/package
+   [DX DIM]     DIAGNOSIS_CODE (ICD-10) → DIAGNOSIS_DESCRIPTION
+   [PHSY DIM]   PRACTITIONER_ID, names, CITY, STATE, SPECIALTY, NPI
+   [PLAN]       PLAN_ID, PLAN_NAME, PLAN_TYPE, NATIONAL_INSURER_NAME, PBM
+   [PX DIM]     PROCEDURE_CODE → PROCEDURE_DESCRIPTION
+   [PRC ROLES]  practitioner role lookup
+
+ FACTS / CLAIMS
+   [DX CLM]     diagnosis events (PATIENT_ID, SERVICE_DATE, DIAGNOSIS_CODE)
+   [RX CLM]     prescription fills (PATIENT_PAY, PLAN_PAY, RX_FILL_DATE,
+                DRUG_ID, PRACTITIONER_ID, PLAN_ID) — REVENUE = PLAN_PAY+PATIENT_PAY
+   [PX  CLM]    procedures/visits (TWO spaces in the name!)
+   [PTNT ACT]   activity flags per year/quarter
+   [PTNT_MPD]   Medicare Part D phases & spend
+   [NEW_PTNT]   newly captured patients
+   Fact_Sx                  side-effect reports + severity (Low/Medium/High)
+   Fact_Drug_Switches       from_drug_id → to_drug_id + reason
+                            ('Cost','Side Effect','Effectiveness','Insurance')
+   Fact_Insurance_Claims    payer, region, amounts, status, denial reason,
+                            prior_auth_days
+   Fact_Marketing           campaign spend by region/drug
+
+ AGENT OPERATIONAL TABLES (auto-created; all timestamps UTC)
+   Agent_Pending_Actions · Agent_Business_Actions · Agent_Appointments ·
+   Agent_Notifications · Agent_Audit_Log · Agent_Chat_History
+
+ KEY DERIVED DEFINITIONS (shared by SQL and the AI)
+   Confirmed epilepsy   = any cohort G40.* code in [DX CLM]
+   Contexts (severity)  = seizure duration encoded in the code:
+                          EPILEPTIC (<2 min) · PROLONGED (2–5 min) ·
+                          STATUS EPILEPTICUS (5+ min)
+   Age bands            = 0-1 · 2-11 · 12-17 · 18+ (from PATIENT_BIRTH_YEAR)
+   Untreated            = confirmed epilepsy, but NO [RX CLM] fill for an
+                          anti-seizure class (BB_USC_CODE 72110/72120/72130/72140)
+   Undiagnosed suspect  = ONLY symptom codes (R56.9/R56.00/R56.01), no G40
+   Active/adherent      = fill within 120 days of the data's max fill date
+                          (or of the selected date window's end)
+   OUR revenue at risk  = switches AWAY from MANUFACTURER='EISAI' drugs
+
+ NOTE ON MANUFACTURERS: the manufacturer 'UCB' was removed from the database
+ (relabeled to 'OTHERS'); its brands remain as competitor drugs. "Us" = EISAI.
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 4. PAGE-BY-PAGE: GRAPHS (WHAT & WHY) + AGENTIC FEATURES
+───────────────────────────────────────────────────────────────────────────────
+
+ 4.0 DASHBOARD MECHANICS (shared by every data page — Power-BI style)
+ --------------------------------------------------------------------
+ • 📅 DATE SLICER — a month-granular range slider at the top of each section;
+   moving either handle re-queries EVERY chart, KPI, table and the AI context
+   on that page (backend functions all accept d1/d2). Full-range = no filter
+   (fast path).
+ • CLICK CROSS-FILTER — clicking a bar (or a state on a map) filters every
+   other visual in the SAME section. The clicked bar stays full colour, the
+   rest fade (highlight); a "🔗 Cross-filter: X = value" banner appears with a
+   ✖ Clear button. One active dimension per section (kept deliberately simple).
+ • DATA LABELS & FORMATTING — every bar shows its value; every number ≥4
+   digits is comma-separated; currency labeled $.
+ • COLOR POLICY — no red in charts (user preference); blue = us (EISAI),
+   amber = competitors, gray = others/neutral.
+ • Every chart has a plain-English caption including how to use the click
+   interaction.
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PAGE 1 · EXECUTIVE COMMAND CENTER          Agent: "Chief-of-Staff Agent" │
+└──────────────────────────────────────────────────────────────────────────┘
+ KPI cards: Total Patients · Total Sales · On Active Therapy ·
+            Diagnosed-Not-Treated · Possibly Undiagnosed (green = pipeline) ·
+            Denied Claims — every card has a hover tooltip in plain English.
+ GRAPH: Sales trend (Quarterly bars / Monthly area, $ labels on bars)
+   CROSS-FILTER: click a quarter/month → whole page focuses on that period.
+ GRAPH: Patients by Medicine Category (horizontal bars, friendly names)
+   CROSS-FILTER: click a category → sales trend filters to that drug class.
+ EXPANDERS: possibly-undiagnosed / denied claims / untreated worklists with
+   one-click "queue outreach/escalation" buttons (land in Action Center).
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PAGE 2 · PATIENT JOURNEY EXPLORER            Agent: "Care-Journey Agent" │
+└──────────────────────────────────────────────────────────────────────────┘
+ FILTERS: Seizure context (duration) → Age group → Patient ID (richest
+   journeys first); live count banner of matching patients.
+ PATIENT HEADER: ID, birth year, gender, state, context, age group (metric
+   values wrap — never truncated).
+ GRAPH: TIMELINE STORYTELLER — a grid: one ROW per event type (Visits &
+   tests · Diagnoses · Medicines picked up · Switched medicine · Side
+   effects), one coloured SQUARE per event, years across the bottom (bold
+   yearly gridlines + lighter quarterly lines). A month-level date slider
+   zooms the grid to any window. Hover a square for the full story sentence.
+   WHY : reads like a medical chart — gaps, diagnosis odyssey, and
+   side-effect→switch causality become visible instantly.
+ PLUS: "Read this journey as a story" (plain-language bullet list) and full
+   event table expanders.
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PAGE 3 · DIAGNOSIS INTELLIGENCE               Agent: "Diagnosis Agent"   │
+└──────────────────────────────────────────────────────────────────────────┘
+ Tab ⏱ Time to Treatment:
+   GRAPH: Avg days Diagnosis→Treatment by state (bar; click = state filter)
+   GRAPH: Top Diagnoses Recorded (horizontal bar; long ICD descriptions are
+   shortened to readable labels, e.g. "Focal – complex partial · 2-5 min ·
+   hard-to-treat"; full medical text on hover)
+ Tab 🔍 Undiagnosed Suspects: worklist table + Suspects-by-State bar
+ Tab 🚫 Diagnosed but Untreated: worklist table + Untreated-by-State bar
+ State clicks in ANY tab cross-filter all three tabs' charts and tables.
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PAGE 4 · TREATMENT & ADHERENCE                Agent: "Adherence Agent"   │
+└──────────────────────────────────────────────────────────────────────────┘
+ GRAPH: Epilepsy Treatment Funnel (Diagnosed → Treated → Adherent, comma'd
+   values + % of initial) with metric cards alongside.
+ GRAPH: Why Patients Switch / Discontinue (bar by reason)
+   CROSS-FILTER: click a reason → Sankey + tables filter to that reason.
+ GRAPH: Old→New Medicine flow (bipartite Sankey, top 15 flows; blue = our
+   brands Banzel/Fycompa, amber = competitor brands, gray = others).
+ *** AI SWITCH ANALYST *** — no manual filters: three one-click plays
+   (Win back biggest EISAI losses · Rescue cost-driven switchers · Follow up
+   side-effect switchers) + free-text questions; the agent finds the exact
+   patient_ids and proposes win-back actions for approval.
+ EXPANDER: patients who switched away from OUR medicines (reason-filterable).
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PAGE 5 · MARKET ACCESS & PAYER              Agent: "Market-Access Agent" │
+└──────────────────────────────────────────────────────────────────────────┘
+ Payer scorecard (claims, billed, paid, stuck-in-denials with claim count).
+ GRAPH: Which insurers refuse most (bar with % labels)
+   CROSS-FILTER: click an insurer bar (or use the dropdown) → scorecard,
+   reasons, wait-times and the claims table all focus on that insurer.
+ GRAPH: Why they refused (reasons bar) · GRAPH: prior-auth wait by state.
+ TABLE: refused claims per patient, $ sorted — the appeal worklist.
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PAGE 6 · PHYSICIAN & GEO INTELLIGENCE         Agent: "Commercial Agent"  │
+└──────────────────────────────────────────────────────────────────────────┘
+ FILTERS: specialty + state dropdowns; chart clicks set the same filters.
+ GRAPH: Doctors scatter (patients treated × sales; bubble = active patients).
+ GRAPH: Sales by specialty (bar; click = specialty filter).
+ GRAPH: TOP DOCTORS — WHOSE MEDICINES DO THEY PRESCRIBE? (stacked bars):
+   each top-12 doctor's prescribing $ split by MANUFACTURER — blue = EISAI,
+   6 biggest competitors named, the rest grouped as gray OTHERS.
+   WHY : loyalty at a glance — long bar + thin blue slice = high-volume,
+   low-loyalty doctor = exactly who the field team should visit.
+ DOCTOR PROFILE: per-doctor metrics incl. "EISAI share (us)" %, medicines
+   table, and a per-doctor manufacturer % bar chart.
+ GRAPHS: two US choropleth heatmaps — Sales by state (blues) & Marketing
+   spend by state (oranges); comparing them exposes over-spent/under-selling
+   states. Click a state on either map → whole page focuses on it.
+ EXPANDER: top epilepsy-treatment centers (filter-aware).
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PAGE 7 · AI STRATEGY AGENT (chat)     Agent: "Strategist / Orchestrator" │
+└──────────────────────────────────────────────────────────────────────────┘
+ Free-form questions → the agent writes and runs its own T-SQL (read-only,
+ guarded), reasons across up to 12 tool steps, answers with real numbers in
+ plain English (≤~150 words + the SQL it ran in a code block), presents 2–3
+ decision options, and proposes patient/business actions via tools.
+ Chat history persists in Agent_Chat_History (survives restarts; the agent
+ can answer "what did we discuss last time?").
+ NOTE: this page is CHAT ONLY — all approvals live in ⚡ Action Center.
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ PAGE 8 · ⚡ ACTION CENTER                  Agent: "Autopilot + Human HQ" │
+└──────────────────────────────────────────────────────────────────────────┘
+ • Value dashboard: Value Captured · Value Pending · Actions Executed (incl.
+   Autopilot count) · Approval Rate · Patient Touchpoints.
+ • 🚀 Deep Agent Scan (Claude) & 🐕 Re-run Watchdog Sweep buttons + logs.
+ • Tabs: 🕓 Patient Actions · 🏢 Business Actions · 📜 History ·
+   📅 Appointments · 📧 Notifications · 🔍 Audit Log.
+ • Every tab shows the "🕒 all times are UTC" banner and timestamp columns
+   are labeled created_at (UTC) / resolved_at (UTC) / sent_at (UTC).
+ • Approve ALL / Reject ALL plus per-card approval.
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 5. THE AGENTIC FRAMEWORK — HOW "SUGGEST → APPROVE → EXECUTE" WORKS
+───────────────────────────────────────────────────────────────────────────────
+
+ 5.1 Opportunity Cards (multi-option recommendations)
+   Every page's live, FILTER-AWARE data → generate_page_insight() → Claude
+   returns STRICT JSON: headline, number-backed insights[], risks[],
+   business_opportunity, opportunities[] — each with a finding,
+   value_at_stake, and 2–3 GENUINELY different options (label, approach,
+   effort/cost, timeframe, confidence, trade-off reason, expected impact,
+   estimated_value_usd, and executable steps[]).
+   UX RULE: once an option is Approved or Queued, the WHOLE card disappears
+   from the page (the alternatives were routes to the same finding); a toast
+   points to the Action Center. Fresh "Generate" clears dismissals.
+   WHY multi-option: the AI is the analyst; the BUSINESS stays the decision-
+   maker.
+
+ 5.2 Two action categories
+   PATIENT-LEVEL: schedule_appointment · send_notification ·
+     order_diagnostic_test · change_prescription · escalate_claim ·
+     enroll_support_program · refer_to_specialist
+   BUSINESS-LEVEL (team-routed): reallocate_marketing_budget→marketing ·
+     deploy_field_reps→field-force · launch_physician_education→med-affairs ·
+     initiate_payer_negotiation→market-access · launch_screening_campaign→
+     med-affairs · partner_with_center→commercial
+   WHY the split: marketing/payer findings shouldn't produce patient spam;
+   patient urgency shouldn't produce vague strategy advice.
+
+ 5.3 Playbooks — an option's steps[] may hold 2–4 ordered steps mixing
+   categories; approval runs them in order, each with its own record,
+   notification and audit row.
+
+ 5.4 Approval workflow (the safety model)
+   AI proposes → row in Agent_Pending_Actions / Agent_Business_Actions
+   (duplicate guard + 30-day rejection memory) → human decides (page card or
+   Action Center) → execute → real records + notification (SMTP or simulated)
+   + audit entry, all UTC-stamped.
+
+ 5.5 The chat agent loop — messages → Claude (tools) → tool_use? → run tool →
+   append result → repeat (≤12) → final text. Guards: SELECT-only, keyword
+   blocklist, 200-row cap, T-SQL dialect awareness, readable API-error
+   handling (auth / rate limit / network).
+
+ 5.6 Autonomy — scheduler.py runs the same mission daily at 08:00; humans
+   arrive to a prioritised, pre-analysed queue.
+
+ 5.7 Claude API usage — model from .env (default claude-opus-4-8); adaptive
+   thinking; structured outputs (json_schema) for insights; strict tool
+   schemas; key only from .env.
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 6. AGENT ROSTER (conceptual agents → where they live)
+───────────────────────────────────────────────────────────────────────────────
+   Chief-of-Staff Agent   Exec page insight       cross-domain briefing
+   Care-Journey Agent     Journey page insight    per-patient next steps
+   Diagnosis Agent        Diagnosis page insight  find & convert undiagnosed
+   Adherence Agent        Treatment page insight  prevent drop-off, win-back
+   Switch Analyst         Treatment page          one-click win-back plays
+   Market-Access Agent    Payer page insight      recover denials
+   Commercial Agent       Physician/Geo insight   spend, territories, loyalty
+   Strategist (chat)      agent.py                free-form SQL + actions
+   Watchdog               agent_watchdog.py       rule-based reflex layer
+   Autopilot              scheduler / toggles     unattended risk-tiered acting
+   (One brain — Claude with one privacy/action policy — many lenses.)
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 7. PRIVACY & SECURITY CHECKLIST
+───────────────────────────────────────────────────────────────────────────────
+   ✓ No patient names anywhere (none exist in the data; ID-only by design)
+   ✓ Agent SQL guard: SELECT-only + write/DDL blocklist + 200-row cap
+   ✓ Notifications to de-identified aliases (patient_<id>@notify.pharma)
+   ✓ API key / DB credentials only in .env, never in code
+   ✓ Full UTC audit trail of AI and human activity
+   ✓ Human approval gate on every side-effecting action (risk-tiered)
+   ✓ App writes ONLY to its own Agent_* tables — never to source claims data
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 8A. AUTONOMY LAYER (IMPLEMENTED)
+───────────────────────────────────────────────────────────────────────────────
+ • AUTONOMOUS WATCHDOG (agent_watchdog.py) — runs on every app start and in
+   the scheduler: 1) HIGH-severity side effects with no follow-up, 2) denied
+   claims not yet escalated ($ desc), 3) diagnosed-but-untreated patients.
+   Max 5 proposals/category/sweep, duplicate-aware.
+ • RISK-TIERED AUTO-EXECUTION (actions.RISK_TIERS + sidebar toggle)
+     LOW  → auto-executed as "Autopilot" when Autonomous Mode is ON:
+            send_notification, schedule_appointment, escalate_claim,
+            enroll_support_program
+     HIGH → ALWAYS human-approved: order_diagnostic_test, change_prescription,
+            refer_to_specialist, and ALL business actions.
+ • STICKY TOGGLES — Autonomous Mode & Auto-generate Insights persist across
+   page navigation (backed by non-widget session keys).
+ • LEARNING FROM REJECTIONS — rejected actions are not re-proposed for 30
+   days; recent rejections are injected into every insight/chat call.
+ • VALUE LOOP — every proposal carries estimated_value_usd; Action Center
+   shows Value Captured / Pending / Approval Rate; queues sort by value.
+ • AGENT STATUS STRIP — every page shows autonomy state, watchdog detections,
+   pending approvals ($) and value captured.
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 8B. OPERATIONS NOTES (RUNTIME BEHAVIOURS WORTH KNOWING)
+───────────────────────────────────────────────────────────────────────────────
+ • SELF-HEAL IMPORTS — Streamlit hot-reloads app.py but keeps old imported
+   modules in memory; a guard at the top of app.py detects a stale backend/db
+   (marker checks) and importlib.reload()s them — a browser refresh fixes
+   "module has no attribute ..." errors without restarting the server.
+ • REFRESH FROM SSMS — sidebar button clears cached insights and re-runs the
+   watchdog; new rows added in SSMS appear immediately.
+ • DATE ANCHORING — the data ends in 2025; "active/adherent" anchors to the
+   max fill date (or the selected window's end), not to today.
+ • uvicorn is pinned <0.44 (websocket reconnect race with Streamlit).
+ • Insight cards and their dismissals are session-scoped; approved/queued
+   actions persist in the database.
+
+
+───────────────────────────────────────────────────────────────────────────────
+ 9. FUTURE ENHANCEMENTS — FROM INSIGHT TO PREDICTION & PRESCRIPTION
+───────────────────────────────────────────────────────────────────────────────
+ 9.1 Realized-vs-estimated value reconciliation (mark actions "converted"
+     when the patient actually starts therapy / the claim is approved).
+ 9.2 Predictive layer — churn-risk scoring per active patient; next-quarter
+     revenue forecast incl. "approve these 12 → +$85K projected"; diagnosis
+     propensity ranking for suspects.
+ 9.3 Auto-briefing — one-click Executive Weekly Brief (findings, decisions,
+     pending approvals, captured value) as a shareable document/email.
+ 9.4 True multi-agent orchestration — run the section personas in parallel
+     with an orchestrator that merges, deduplicates and priority-ranks.
+ 9.5 Next-Best-Action ranking (value × confidence × urgency).
+ 9.6 What-if simulation ("cut HealthPlus denials to 10% → funnel/revenue?").
+ 9.7 Real-time alert webhooks (Teams/Slack/email on new HIGH side effect).
+ 9.8 Learning memory — persist per-user decision style, lead with it.
+ 9.9 RAG over payer policies & guidelines so proposals cite evidence.
+ 9.10 Document generation — appeal letters, education one-pagers, enrolment
+      packs, so "Approve" delivers a ready artefact.
+ 9.11 EHR/CRM/calendar integrations (Outlook, Veeva/Salesforce, portal API) —
+      only actions.py changes by design.
+ 9.12 Cohort discovery by ML (journey-sequence clustering → archetypes).
+ 9.13 Competitive-intelligence agent (share-of-switching inflections →
+      counter-moves with projected recovery).
+ 9.14 Compliance & governance — role-based approvals, PII access logging,
+      explainability records per action for regulatory audit.
+
+═══════════════════════════════════════════════════════════════════════════════
+ END OF DOCUMENT
+═══════════════════════════════════════════════════════════════════════════════

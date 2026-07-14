@@ -1,0 +1,11 @@
+streamlit
+# uvicorn 0.44+ switches Streamlit to the "websockets-sansio" protocol, which has a
+# reconnect race ("Expected ASGI message 'websocket.send'... got 'websocket.accept'").
+# Pinning below 0.44 keeps the stable legacy websocket implementation.
+uvicorn>=0.30,<0.44
+pandas
+plotly
+anthropic
+pyodbc
+schedule
+openpyxl

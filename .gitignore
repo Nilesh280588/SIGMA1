@@ -1,0 +1,34 @@
+# Environments
+venv/
+env/
+.env
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Database (Do not commit patient data or the SQLite database)
+database/*.db
+database/*.sqlite3
+
+# Reports and generated files
+reports/*.xlsx
+reports/*.pdf
+reports/*.csv
+
+# Streamlit
+.streamlit/credentials.toml
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+credentials/
+
+# Local tool settings
+.claude/
