@@ -16,7 +16,7 @@ from agent import agent, run_autopilot_scan
 # modules (backend, db, ...) from the moment the server started. After the
 # code is updated, the running process can hold an OLD backend that lacks
 # newly added functions (AttributeError). Detect that and reload in-place.
-if getattr(bk, "OUR_MFR", "") != "EISAI" or not getattr(db, "TIMESTAMPS_UTC", False):
+if not getattr(bk, "COHORT_KPIS", False) or not getattr(db, "TIMESTAMPS_UTC", False):
     import importlib
     db = importlib.reload(db)
     bk = importlib.reload(bk)
@@ -470,10 +470,12 @@ def render_ai_panel(page_name, data_context, key):
 # PAGE 1 — EXECUTIVE COMMAND CENTER
 # ══════════════════════════════════════════
 if page == "Executive Command Center":
-    st.markdown('<div class="page-header">Executive Command Center</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-sub">The health of the business at a glance — how much we earn, how many '
-                'people we treat, and where money is being left on the table. Hover any number for what it means.</div>',
+    st.markdown('<div class="page-header">Executive Command Center — Seizure & Epilepsy Patients</div>',
                 unsafe_allow_html=True)
+    st.markdown('<div class="page-sub">The health of our <strong>seizure business</strong> at a glance. Every '
+                'number below counts ONLY seizure &amp; epilepsy patients and anti-seizure medicines — how much '
+                'we earn from them, how many we treat, and where money is being left on the table. '
+                'Hover any number for what it means.</div>', unsafe_allow_html=True)
 
     # ── Dashboard controls: date slicer + click-to-cross-filter ──
     lo, hi = section_date_filter("exec")
@@ -511,27 +513,30 @@ if page == "Executive Command Center":
                 f'<div class="kpi-sub {sub_class}">{sub}</div></div>')
 
     row1 = "".join([
-        kpi("Total Patients", f"{kpis['total_patients']:,}", "people in our data",
-            "Every unique patient in the database (identified only by an ID, never by name)."),
-        kpi("Total Sales",
+        kpi("Seizure Patients", f"{kpis['total_patients']:,}", "epilepsy & seizure cohort",
+            "Every patient with an epilepsy/seizure-symptom diagnosis or on anti-seizure medicine (ID only, never a name)."),
+        kpi("Seizure-Med Sales",
             (f"${kpis['total_revenue']/1e6:,.2f}M" if kpis['total_revenue'] >= 1e6
-             else f"${kpis['total_revenue']:,.0f}"), "gross drug sales",
-            "Total money paid for every prescription filled = amount paid by insurance plans PLUS the amount "
-            "patients paid out of pocket. This is our gross drug sales across the whole period."),
-        kpi("On Active Therapy", f"{kpis['active_treatments']:,}", "filled a script recently",
-            "Patients who filled a prescription in the last 120 days — still actively on treatment and generating revenue."),
-        kpi("Diagnosed, Not Treated", f"{kpis['untreated_rare']:,}", "missed revenue",
-            "Patients diagnosed with epilepsy who have NOT started any anti-seizure medicine. Each is a patient "
-            "we could help and revenue we haven't captured.", "red"),
-        kpi("Possibly Undiagnosed", f"{kpis['undiagnosed_suspects']:,}", "future patients",
-            "Patients showing warning-sign symptoms but with no confirmed diagnosis yet. If diagnosed, they may "
-            "need our therapy — a future (pipeline) opportunity.", "green"),
-        kpi("Denied Insurance Claims", f"{kpis['denied_claims']:,}", "revenue held up by payers",
-            "Prescriptions the insurer refused to pay — money earned but not collected. Many can be recovered by appeal.", "red"),
+             else f"${kpis['total_revenue']:,.0f}"), "anti-seizure drug sales",
+            "Total paid for anti-seizure prescriptions = insurance payments + patient out-of-pocket."),
+        kpi("On Seizure Therapy", f"{kpis['active_treatments']:,}", "filled a seizure Rx recently",
+            "Patients who filled an anti-seizure prescription in the last 120 days — still actively on treatment."),
+        kpi("Diagnosed, Not Treated", f"{kpis['untreated_rare']:,}", "epilepsy, no medicine",
+            "Diagnosed with epilepsy but never started an anti-seizure medicine — missed revenue we can capture.", "red"),
+        kpi("Possibly Undiagnosed", f"{kpis['undiagnosed_suspects']:,}", "seizure symptoms only",
+            "Seizure warning-signs recorded but no confirmed diagnosis yet — future (pipeline) patients.", "green"),
+        kpi("Denied Seizure-Med Claims", f"{kpis['denied_claims']:,}", "revenue held up by payers",
+            "Anti-seizure claims the insurer refused to pay — often recoverable by appeal (claims, not patients).", "red"),
     ])
     st.markdown(f'<div class="kpi-row">{row1}</div>', unsafe_allow_html=True)
-    st.caption("💡 Sales = insurance-plan payments + patient out-of-pocket, across every prescription filled. "
-               "Patient counts are distinct people; claim counts are individual insurance transactions.")
+    _treated = kpis["active_treatments"] + kpis["discontinued"]
+    st.caption(f"🧮 **How the numbers add up:** {kpis['total_patients']:,} seizure patients = "
+               f"{kpis['rare_diagnosed']:,} diagnosed with epilepsy + {kpis['undiagnosed_suspects']:,} suspected "
+               f"(symptoms only). Of the diagnosed: {kpis['untreated_rare']:,} never started medicine + "
+               f"{_treated:,} started therapy — of whom {kpis['active_treatments']:,} are active today and "
+               f"{kpis['discontinued']:,} have lapsed/stopped (no card of their own — see the Treatment funnel). "
+               f"Denied claims ({kpis['denied_claims']:,}) are insurance transactions, not extra patients. "
+               f"Hover any card for what it means.")
 
     # ── Explore the numbers & take action ──
     st.markdown("#### 🔎 Explore the numbers & take action")
@@ -551,15 +556,15 @@ if page == "Executive Command Center":
                     proposed_by="Executive Page", execute_now=False)
                 st.success("Queued for approval — see ⚡ Action Center.")
     with e2:
-        with st.expander(f"👁 {kpis['denied_claims']} denied claims & why"):
-            dr = bk.get_denial_reasons(d1=eff_d1, d2=eff_d2)
+        with st.expander(f"👁 {kpis['denied_claims']} denied seizure-med claims & why"):
+            dr = bk.get_denial_reasons(d1=eff_d1, d2=eff_d2, asm_only=True)
             if not dr.empty:
                 figd = px.bar(dr, x="count", y="denial_reason", orientation="h", text="count",
                               color_discrete_sequence=["#f59e0b"], labels={"count": "Claims", "denial_reason": ""})
                 figd.update_traces(texttemplate="%{x:,}", textposition="outside", cliponaxis=False)
                 figd.update_layout(yaxis=dict(automargin=True), margin=dict(l=10, r=45, t=44, b=10))
                 st.plotly_chart(chart_layout(figd, "Why claims were denied", 240), use_container_width=True)
-            dcp = bk.get_denied_claims_patients(d1=eff_d1, d2=eff_d2)
+            dcp = bk.get_denied_claims_patients(d1=eff_d1, d2=eff_d2, asm_only=True)
             if not dcp.empty:
                 st.caption(f"${dcp['claim_amount'].sum():,.0f} in denied claims — much of it recoverable by appeal.")
                 st.dataframe(dcp.head(50), use_container_width=True, height=200, hide_index=True)
@@ -591,7 +596,7 @@ if page == "Executive Command Center":
     col_a, col_b = st.columns(2)
     with col_a:
         h1, h2, h3 = st.columns([3, 2, 1])
-        h1.markdown("**📈 Sales trend**")
+        h1.markdown("**📈 Seizure-medicine sales trend**")
         gran = h2.radio("gran", ["Quarterly", "Monthly"], horizontal=True, label_visibility="collapsed", key="rev_gran")
         if h3.button("🔄", key="ref_rev", help="Refresh this chart from SSMS"):
             st.rerun()
@@ -605,7 +610,7 @@ if page == "Executive Command Center":
                 fig.update_layout(margin=dict(l=10, r=10, t=54, b=10))
                 if xf and xf[0] == "Period":
                     highlight_bars(fig, dfq["period"].tolist(), xf[1], "#2563eb")
-                ev = st.plotly_chart(chart_layout(fig, "Sales by Quarter"), use_container_width=True,
+                ev = st.plotly_chart(chart_layout(fig, "Seizure-Medicine Sales by Quarter"), use_container_width=True,
                                      key=_ck("exec", "rev_q"), on_select="rerun")
                 apply_crossfilter("exec", "Period", clicked_value(ev))
         else:
@@ -617,14 +622,14 @@ if page == "Executive Command Center":
                               labels={"month_dt": "", "revenue": "Sales (USD)"})
                 fig.update_xaxes(dtick="M3", tickformat="%b\n%Y")
                 fig.update_traces(hovertemplate="%{x|%b %Y}<br>$%{y:,.0f}<extra></extra>")
-                ev = st.plotly_chart(chart_layout(fig, "Sales by Month"), use_container_width=True,
+                ev = st.plotly_chart(chart_layout(fig, "Seizure-Medicine Sales by Month"), use_container_width=True,
                                      key=_ck("exec", "rev_m"), on_select="rerun")
                 apply_crossfilter("exec", "Period", clicked_value(ev))
-        st.caption("How much medicine we sold in each period — the money that came in from all prescriptions. "
-                   "**Click a bar/point** to focus every number on this page on that period.")
+        st.caption("How much anti-seizure medicine we sold in each period — the money that came in from all "
+                   "seizure prescriptions. **Click a bar/point** to focus every number on this page on that period.")
     with col_b:
         h1, h2 = st.columns([5, 1])
-        h1.markdown("**👥 Patients by health condition**")
+        h1.markdown("**👥 Seizure patients by medicine category**")
         if h2.button("🔄", key="ref_pop", help="Refresh this chart from SSMS"):
             st.rerun()
         CONDITION_NAMES = {
@@ -644,11 +649,12 @@ if page == "Executive Command Center":
             fig.update_layout(margin=dict(l=10, r=45, t=44, b=10), yaxis=dict(automargin=True))
             if usc_filter:
                 highlight_bars(fig, df_dist["disease_name"].tolist(), usc_filter, "#0d9488")
-            ev = st.plotly_chart(chart_layout(fig, "Patients by Medicine Category"), use_container_width=True,
+            ev = st.plotly_chart(chart_layout(fig, "Seizure Patients by Medicine Category"), use_container_width=True,
                                  key=_ck("exec", "dist"), on_select="rerun")
             apply_crossfilter("exec", "Medicine category", clicked_value(ev, "customdata0"))
-        st.caption("How many patients take each category of seizure medicine — daily control, specialty (LGS), "
-                   "emergency rescue, and add-on medicines. **Click a bar** to filter the sales trend to that category.")
+        st.caption("How many seizure patients take each category of anti-seizure medicine — daily control, "
+                   "specialty (LGS), emergency rescue, and add-on medicines. **Click a bar** to filter the "
+                   "sales trend to that category.")
 
     st.markdown("---")
     render_ai_panel("Executive Command Center", {

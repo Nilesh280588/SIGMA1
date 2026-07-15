@@ -71,33 +71,47 @@ def get_date_bounds():
 # ═══════════════════════════════════════════════════
 # EXECUTIVE KPIs
 # ═══════════════════════════════════════════════════
+# explicit anti-seizure-medicine drug filter — every executive KPI is scoped to the
+# SEIZURE cohort (epilepsy/symptom diagnoses + ASM prescriptions), never "all patients"
+_ASM_DRUGS = f"(SELECT DRUG_ID FROM [DRUG DIM] WHERE BB_USC_CODE IN ({ASM_USC}))"
+COHORT_KPIS = True   # marker for app.py's stale-module self-heal guard
+
+
 def get_kpi_summary(d1=None, d2=None):
     k = {}
     rx_w, rx_p = _rng("RX_FILL_DATE", d1, d2)
     dx_w, dx_p = _rng("SERVICE_DATE", d1, d2)
     cl_w, cl_p = _rng("claim_date", d1, d2)
+    # SEIZURE COHORT = patients with an epilepsy/seizure-symptom diagnosis OR an
+    # anti-seizure prescription (never the raw patient dimension)
+    k["total_patients"] = int(db.scalar(f"""
+        SELECT COUNT(*) FROM (
+            SELECT PATIENT_ID FROM [DX CLM]
+            WHERE DIAGNOSIS_CODE IN ({EPI_ICD},{SYMPTOM_ICD}){dx_w}
+            UNION
+            SELECT PATIENT_ID FROM [RX CLM]
+            WHERE DRUG_ID IN {_ASM_DRUGS}{rx_w}) t""", dx_p + rx_p))
     if d1 and d2:
-        k["total_patients"] = int(db.scalar("""
-            SELECT COUNT(*) FROM (
-                SELECT PATIENT_ID FROM [RX CLM] WHERE RX_FILL_DATE BETWEEN ? AND ?
-                UNION SELECT PATIENT_ID FROM [DX CLM] WHERE SERVICE_DATE BETWEEN ? AND ?) t""",
-            [d1, d2, d1, d2]))
         # "active" anchored to the end of the selected window
         k["active_treatments"] = int(db.scalar(f"""
             SELECT COUNT(DISTINCT PATIENT_ID) FROM [RX CLM]
-            WHERE RX_FILL_DATE BETWEEN DATEADD(DAY, -{ADH_WINDOW}, ?) AND ?""", [d2, d2]))
+            WHERE DRUG_ID IN {_ASM_DRUGS}
+              AND RX_FILL_DATE BETWEEN DATEADD(DAY, -{ADH_WINDOW}, ?) AND ?""", [d2, d2]))
     else:
-        k["total_patients"] = int(db.scalar("SELECT COUNT(*) FROM [PTNT DIM]"))
         k["active_treatments"] = int(db.scalar(f"""
             SELECT COUNT(DISTINCT PATIENT_ID) FROM [RX CLM]
-            WHERE RX_FILL_DATE >= DATEADD(DAY, -{ADH_WINDOW}, {_MAXD})"""))
-    k["total_revenue"] = float(db.scalar(f"SELECT COALESCE(SUM({REV}),0) FROM [RX CLM] WHERE 1=1{rx_w}", rx_p))
-    treated = int(db.scalar(f"SELECT COUNT(DISTINCT PATIENT_ID) FROM [RX CLM] WHERE 1=1{rx_w}", rx_p))
+            WHERE DRUG_ID IN {_ASM_DRUGS}
+              AND RX_FILL_DATE >= DATEADD(DAY, -{ADH_WINDOW}, {_MAXD})"""))
+    k["total_revenue"] = float(db.scalar(
+        f"SELECT COALESCE(SUM({REV}),0) FROM [RX CLM] WHERE DRUG_ID IN {_ASM_DRUGS}{rx_w}", rx_p))
+    treated = int(db.scalar(
+        f"SELECT COUNT(DISTINCT PATIENT_ID) FROM [RX CLM] WHERE DRUG_ID IN {_ASM_DRUGS}{rx_w}", rx_p))
     k["discontinued"] = max(treated - k["active_treatments"], 0)
     sw_w, sw_p = _rng("switch_date", d1, d2)
     k["total_switches"] = int(db.scalar(f"SELECT COUNT(*) FROM Fact_Drug_Switches WHERE 1=1{sw_w}", sw_p))
     k["denied_claims"] = int(db.scalar(
-        f"SELECT COUNT(*) FROM Fact_Insurance_Claims WHERE status='Denied'{cl_w}", cl_p))
+        f"SELECT COUNT(*) FROM Fact_Insurance_Claims "
+        f"WHERE status='Denied' AND drug_id IN {_ASM_DRUGS}{cl_w}", cl_p))
     k["rare_diagnosed"] = int(db.scalar(
         f"SELECT COUNT(DISTINCT PATIENT_ID) FROM [DX CLM] WHERE DIAGNOSIS_CODE IN ({RA_ICD}){dx_w}", dx_p))
     k["untreated_rare"] = int(db.scalar(f"""
@@ -123,20 +137,24 @@ def _usc_where(usc_name):
 
 
 def get_revenue_by_month(d1=None, d2=None, usc_name=None):
+    """Anti-seizure medicine sales only (the executive view is seizure-cohort scoped)."""
     w, p = _rng("RX_FILL_DATE", d1, d2)
     uw, up = _usc_where(usc_name)
     return db.run_query(f"""
         SELECT FORMAT(RX_FILL_DATE,'yyyy-MM') AS month, SUM({REV}) AS revenue
-        FROM [RX CLM] WHERE RX_FILL_DATE IS NOT NULL{w}{uw}
+        FROM [RX CLM] WHERE RX_FILL_DATE IS NOT NULL
+          AND DRUG_ID IN {_ASM_DRUGS}{w}{uw}
         GROUP BY FORMAT(RX_FILL_DATE,'yyyy-MM') ORDER BY month""", p + up)
 
 
 def get_revenue_by_quarter(d1=None, d2=None, usc_name=None):
+    """Anti-seizure medicine sales only (the executive view is seizure-cohort scoped)."""
     w, p = _rng("RX_FILL_DATE", d1, d2)
     uw, up = _usc_where(usc_name)
     df = db.run_query(f"""
         SELECT YEAR(RX_FILL_DATE) AS yr, DATEPART(QUARTER, RX_FILL_DATE) AS q, SUM({REV}) AS revenue
-        FROM [RX CLM] WHERE RX_FILL_DATE IS NOT NULL{w}{uw}
+        FROM [RX CLM] WHERE RX_FILL_DATE IS NOT NULL
+          AND DRUG_ID IN {_ASM_DRUGS}{w}{uw}
         GROUP BY YEAR(RX_FILL_DATE), DATEPART(QUARTER, RX_FILL_DATE)
         ORDER BY yr, q""", p + up)
     if not df.empty:
@@ -145,13 +163,13 @@ def get_revenue_by_quarter(d1=None, d2=None, usc_name=None):
 
 
 def get_patient_distribution(d1=None, d2=None):
-    """Patient population by therapeutic area (drug USC class)."""
+    """Seizure patients by anti-seizure medicine class (ASM classes only)."""
     w, p = _rng("rx.RX_FILL_DATE", d1, d2)
     return db.run_query(f"""
         SELECT TOP 10 dd.BB_USC_NAME AS disease_name,
                COUNT(DISTINCT rx.PATIENT_ID) AS patient_count
         FROM [RX CLM] rx JOIN [DRUG DIM] dd ON rx.DRUG_ID = dd.DRUG_ID
-        WHERE dd.BB_USC_NAME IS NOT NULL{w}
+        WHERE dd.BB_USC_NAME IS NOT NULL AND dd.BB_USC_CODE IN ({ASM_USC}){w}
         GROUP BY dd.BB_USC_NAME ORDER BY patient_count DESC""", p)
 
 
@@ -606,23 +624,25 @@ def get_payer_denial_rates(payer=None, d1=None, d2=None):
         GROUP BY payer_name ORDER BY denial_pct DESC""", p + dp)
 
 
-def get_denial_reasons(payer=None, d1=None, d2=None):
+def get_denial_reasons(payer=None, d1=None, d2=None, asm_only=False):
     w, p = _payer_where(payer)
     dw, dp = _rng("claim_date", d1, d2)
+    aw = f" AND drug_id IN {_ASM_DRUGS}" if asm_only else ""
     return db.run_query(f"""
         SELECT denial_reason, COUNT(*) AS count
-        FROM Fact_Insurance_Claims WHERE status='Denied' AND denial_reason IS NOT NULL{w}{dw}
+        FROM Fact_Insurance_Claims WHERE status='Denied' AND denial_reason IS NOT NULL{w}{dw}{aw}
         GROUP BY denial_reason ORDER BY count DESC""", p + dp)
 
 
-def get_denied_claims_patients(payer=None, d1=None, d2=None):
+def get_denied_claims_patients(payer=None, d1=None, d2=None, asm_only=False):
     w, p = _payer_where(payer)
     dw, dp = _rng("fic.claim_date", d1, d2)
+    aw = f" AND fic.drug_id IN {_ASM_DRUGS}" if asm_only else ""
     return db.run_query(f"""
         SELECT CAST(fic.patient_id AS BIGINT) AS patient_id, fic.payer_name, fic.claim_amount,
                fic.denial_reason, fic.prior_auth_days, d.DRUG_NAME AS brand_name
         FROM Fact_Insurance_Claims fic LEFT JOIN [DRUG DIM] d ON fic.drug_id = d.DRUG_ID
-        WHERE fic.status='Denied'{w}{dw} ORDER BY fic.claim_amount DESC""", p + dp)
+        WHERE fic.status='Denied'{w}{dw}{aw} ORDER BY fic.claim_amount DESC""", p + dp)
 
 
 def get_auth_delay_by_state(payer=None, d1=None, d2=None):

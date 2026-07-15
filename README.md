@@ -2,91 +2,168 @@
 
 **Intelligent Patient Journey Analyser · Agentic Pharma Strategy Platform**
 
-Not just a dashboard — an **AI agent** (powered by **Claude**) that reads your live epilepsy
-patient-journey database (SQL Server / SSMS), explains *what the numbers mean* in plain
-business English, proposes *what to do next*, and — once a human approves — **actually does
-it** (schedules appointments, sends notifications, orders diagnostic tests, flags prescription
-changes, escalates denied insurance claims, queues marketing/payer strategy moves).
+SIGMA is an **AI agent** (powered by **Claude**) built around one cohort: **seizure & epilepsy
+patients** (incl. Lennox-Gastaut Syndrome). It reads a live SQL Server database of their
+journeys, explains *what the numbers mean* in plain business English — always leading with the
+seizure patients first, then the business/physician action — and, once a human approves,
+**actually executes** those actions (appointments, notifications, diagnostic-test orders,
+claim escalations, marketing/payer strategy moves).
 
 **Business identity:** OUR company is **EISAI** (hero brands **BANZEL** and **FYCOMPA**).
-Competitors include Epidiolex (Jazz), Onfi (Lundbeck), Xcopri (SK Life Science), and the
-branded/generic makers grouped under **OTHERS** (incl. Keppra, Vimpat, Briviact, Fintepla,
-Nayzilam). The cohort is US **epilepsy** patients (incl. Lennox-Gastaut Syndrome).
+Competitors: Epidiolex (Jazz), Onfi (Lundbeck), Xcopri (SK Life Science), and branded/generic
+makers grouped as **OTHERS** (incl. Keppra, Vimpat, Briviact, Fintepla, Nayzilam).
+Every number in the app — patients, sales, claims — is scoped to the **seizure cohort only**,
+never a general population.
 
 ---
 
-## 1. Prerequisites
+## 1. What you need before starting (prerequisites)
 
 | Requirement | Details |
 |---|---|
-| **Python** | 3.11+ (project venv was built with 3.14) |
-| **SQL Server + SSMS** | A running SQL Server instance holding the 18 project tables (see §5). The app is **SSMS-only** — there is no SQLite/dummy fallback. |
-| **ODBC driver** | *ODBC Driver 17 or 18 for SQL Server* (the app tries 18 → 17 → legacy "SQL Server" automatically) |
-| **Claude API key** | From <https://console.anthropic.com> — required for all AI features (insight panels, chat agent, deep scan). The dashboards work without it; the AI features don't. |
-| **OS** | Developed and tested on Windows (PowerShell commands below) |
+| **Python 3.11+** | From python.org (tick "Add to PATH" while installing) |
+| **A SQL Server database with the project data** | The repo contains **code only — no data**. You need the project database (18 tables). See §3 for your options. |
+| **Microsoft ODBC Driver 17 or 18 for SQL Server** | Free ~5 MB download from Microsoft. This is how Python talks to SQL Server. *(SSMS itself is NOT required to run the app — it is only a management GUI.)* |
+| **Claude API key** | From <https://console.anthropic.com>. Needed for all AI features (insights, chat agent, deep scan). The dashboards work without it; the AI does not. |
+| **Windows** | Developed & tested on Windows (PowerShell commands below). |
 
 ---
 
-## 2. Setup steps
+## 2. Fresh setup — you just downloaded this repo, now what?
+
+Open **PowerShell** inside the project folder and run, step by step:
 
 ```powershell
-# 1. Clone / unzip the project, then create the environment
-cd Intelligent_Patient_Jouney_Analyser-main
+# Step 1 — create an isolated Python environment
 python -m venv venv
 venv\Scripts\activate
+
+# Step 2 — install all required packages
 pip install -r requirements.txt
-
-# 2. Configure .env (see table below)
-notepad .env
-
-# 3. FIRST: verify the database connection
-python test_connection.py
-
-# 4. Run the app
-streamlit run app.py
-# opens http://localhost:8501
 ```
 
-### .env configuration (all inputs the app reads at startup)
+### Step 3 — create your .env file (the repo does NOT include one, on purpose)
 
-| Key | Required | Meaning |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | for AI features | Your Claude API key (placeholder `xyz` = "not set") |
-| `CLAUDE_MODEL` | no | Model for all AI calls (default `claude-opus-4-8`) |
-| `DB_SERVER` | **yes** | SQL Server instance, e.g. `localhost` or `LAPTOP-123\SQLEXPRESS` |
-| `DB_NAME` | **yes** | Database containing the project tables |
-| `DB_TRUSTED_CONNECTION` | yes/no | `yes` = Windows auth; `no` = use the two keys below |
-| `DB_USERNAME` / `DB_PASSWORD` | if not trusted | SQL login credentials |
-| `SMTP_HOST/PORT/USER/PASSWORD/FROM` | no | Real email delivery for notifications; if unset, notifications are **simulated** and logged to the DB |
+Secrets are never committed to git, so you must create a file named exactly **`.env`**
+in the project root (same folder as `app.py`). Copy this template and fill your values:
+
+```
+# ── Claude AI (get a key at console.anthropic.com) ──
+ANTHROPIC_API_KEY=sk-ant-your-real-key-here
+CLAUDE_MODEL=claude-opus-4-8
+
+# ── SQL Server connection ──
+DB_SERVER=localhost               # where SQL Server runs (see §3)
+DB_NAME=YourDatabaseName          # the database that holds the 18 project tables
+DB_TRUSTED_CONNECTION=yes         # yes = Windows login on THIS pc; no = username/password below
+DB_USERNAME=
+DB_PASSWORD=
+
+# ── Optional: real e-mail sending (leave empty = e-mails are simulated) ──
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM=noreply@pharma-agent.com
+```
+
+What each key means:
+
+| Key | Meaning |
+|---|---|
+| `ANTHROPIC_API_KEY` | Your Claude key. The placeholder `xyz` counts as "not set". |
+| `CLAUDE_MODEL` | Which Claude model the AI uses (default is fine). |
+| `DB_SERVER` | `localhost` if SQL Server runs on this PC; `192.168.x.x` or `HOSTNAME\SQLEXPRESS` if it runs on another machine. |
+| `DB_NAME` | Name of the database containing the project tables. |
+| `DB_TRUSTED_CONNECTION` | `yes` = log in as your Windows user (only works on the same PC/domain). `no` = use `DB_USERNAME` + `DB_PASSWORD` (needed when connecting across machines). |
+| `SMTP_*` | Only if you want real e-mails; otherwise notifications are simulated and stored in the database. |
+
+### Step 4 — test the database connection BEFORE running the app
+
+```powershell
+python test_connection.py
+```
+
+This checks each link in the chain: ODBC driver found → can connect → your tables are
+visible → row counts → the app's own 6 agent tables get created. **Fix whatever step it
+flags before moving on.**
+
+### Step 5 — run the app
+
+```powershell
+streamlit run app.py
+```
+
+Your browser opens at `http://localhost:8501`. Done ✅
 
 ---
 
-## 3. Commands
+## 3. Database setup — where does the data come from?
+
+The repo ships **no data**. Pick the option that matches your situation:
+
+**Option A — SQL Server already runs on this PC with the data loaded**
+(the original development machine). Keep `DB_SERVER=localhost`,
+`DB_TRUSTED_CONNECTION=yes`. Nothing else to do.
+
+**Option B — You got a database backup file (`.bak`) from the team**
+1. Install free **SQL Server Express** from Microsoft (and optionally SSMS as a GUI).
+2. Restore the backup: in SSMS → right-click *Databases* → *Restore Database…* → pick the
+   `.bak` → OK. (Or via command line: `sqlcmd -S localhost -E -Q "RESTORE DATABASE YourDatabaseName FROM DISK='C:\path\to\backup.bak'"`.)
+3. Set `DB_NAME` in `.env` to the restored name; keep `DB_SERVER=localhost`.
+
+**Option C — The database lives on ANOTHER machine (team server / colleague's laptop)**
+1. On the machine that HAS the database: enable **TCP/IP** (SQL Server Configuration
+   Manager → Protocols → TCP/IP → Enable → restart SQL Server), start **SQL Server
+   Browser**, allow firewall ports **TCP 1433 + UDP 1434**, and create a SQL login:
+   ```sql
+   CREATE LOGIN sigma_user WITH PASSWORD = 'YourStrongPassword!123';
+   USE [YourDatabaseName];
+   CREATE USER sigma_user FOR LOGIN sigma_user;
+   ALTER ROLE db_datareader ADD MEMBER sigma_user;
+   ALTER ROLE db_datawriter ADD MEMBER sigma_user;
+   ALTER ROLE db_ddladmin  ADD MEMBER sigma_user;   -- app creates its Agent_* tables
+   ```
+   (Also enable "SQL Server and Windows Authentication mode" in server properties, then
+   restart SQL Server.)
+2. On YOUR machine: install the ODBC driver (§1) and set in `.env`:
+   `DB_SERVER=<that machine's IP>`, `DB_TRUSTED_CONNECTION=no`,
+   `DB_USERNAME=sigma_user`, `DB_PASSWORD=YourStrongPassword!123`.
+3. Both machines must be on the same network/VPN, and the database machine must be ON
+   whenever you run the app.
+
+Whatever option you choose — **always run `python test_connection.py` first.**
+
+---
+
+## 4. Commands
 
 | Command | What it does |
 |---|---|
-| `python test_connection.py` | Pre-flight check: ODBC driver → connection → lists tables → row counts → creates the 6 agent tables. Run this before anything else. |
+| `python test_connection.py` | Pre-flight database check — run this first, always. |
 | `streamlit run app.py` | Starts the web app on port 8501. |
-| `python scheduler.py --once` | One autonomous agent cycle now: Watchdog sweep (auto-executes low-risk actions) + Claude deep scan (fills the approval queue). Prints a report to the console. |
-| `python scheduler.py` | Runs that cycle **every day at 08:00** until stopped (Ctrl+C). |
+| `python scheduler.py --once` | One autonomous agent cycle now (Watchdog + Claude deep scan) — fills the approval queue, prints a report. |
+| `python scheduler.py` | Same cycle automatically **every day at 08:00** (Ctrl+C to stop). |
 
 ---
 
-## 4. The 8 sections (pages)
+## 5. The 8 sections
 
-Every data page works like a **Power BI-style dashboard**: a 📅 **date-range slicer** at the top
-re-filters every chart/number on the page, and **clicking a bar (or a state on a map)
-cross-filters** every other chart in that section (✖ Clear resets). Each chart has a
-plain-English caption.
+Every data page works like a **Power BI-style dashboard**: a 📅 **date-range slicer** at the
+top re-filters every chart/number on the page, and **clicking a bar (or a state on a map)
+cross-filters** every other chart in that section (✖ Clear resets). Every chart has a
+plain-English caption; every KPI card has a one-line hover description.
 
-1. **🏠 Executive Command Center** — KPI cards (patients, sales, untreated, undiagnosed, denied
-   claims), sales trend, patients by medicine category, drill-down expanders with one-click
-   queued actions.
-2. **🧬 Patient Journey Explorer** — one patient's story as a square-grid timeline (visits,
-   diagnoses, medicines, switches, side effects) with its own month-level date slider.
+1. **🏠 Executive Command Center — Seizure & Epilepsy Patients** — six KPI cards scoped to the
+   seizure cohort only (Seizure Patients, Seizure-Med Sales, On Seizure Therapy, Diagnosed-Not-
+   Treated, Possibly Undiagnosed, Denied Seizure-Med Claims) + a "How the numbers add up" line
+   that reconciles the counts, seizure-medicine sales trend, patients by medicine category,
+   drill-down worklists with one-click queued actions.
+2. **🧬 Patient Journey Explorer** — one seizure patient's story as a square-grid timeline
+   (visits, diagnoses, medicines, switches, side effects) with a month-level date slider.
    Patient ID only — no names exist anywhere.
-3. **🔬 Diagnosis Intelligence** — time-to-treatment by state, top diagnoses, undiagnosed
-   suspects, diagnosed-but-untreated (state-wise charts + tables).
+3. **🔬 Diagnosis Intelligence** — time-to-treatment by state, top epilepsy diagnoses,
+   undiagnosed suspects, diagnosed-but-untreated (state-wise charts + worklists).
 4. **💊 Treatment & Adherence** — epilepsy treatment funnel, switch/discontinue reasons,
    old→new medicine Sankey, **AI Switch Analyst** (one-click win-back plays + plain-English Q&A).
 5. **🏥 Market Access & Payer** — insurer scorecard, refusal rates & reasons, prior-auth wait
@@ -94,102 +171,102 @@ plain-English caption.
 6. **👨‍⚕️ Physician & Geo Intelligence** — doctor performance, sales by specialty,
    **manufacturer loyalty mix** (whose medicines each doctor prescribes — blue = EISAI),
    doctor profile with "EISAI share", US choropleth heatmaps for sales & marketing spend.
-7. **🤖 AI Strategy Agent** — chat: Claude writes and runs its own T-SQL live, answers with
-   real numbers, proposes actions (chat only; approvals live in the Action Center).
+7. **🤖 AI Strategy Agent** — chat: Claude writes and runs its own T-SQL live, answers
+   seizure-patient-first with real numbers, proposes actions (approvals live in Action Center).
 8. **⚡ Action Center** — pending patient & business actions (approve/reject), history,
-   appointments, notifications, audit log. **All timestamps are stored & shown in UTC.**
+   appointments, notifications, audit log. **All timestamps stored & shown in UTC.**
 
-### Agent autonomy (sidebar toggles)
+### Agent autonomy (sidebar toggles — they stay as you set them)
 - **Autonomous Mode** (default ON): the Watchdog auto-executes **low-risk** actions
   (outreach, claim escalation, appointments) as "Autopilot". **High-risk** actions
-  (tests, prescriptions, referrals, budget moves) always wait for human approval.
+  (tests, prescriptions, referrals, budget moves) always wait for your approval.
 - **Auto-generate AI insights** (default OFF): ON = every page generates its Claude insight
   on first visit (uses API credits); OFF = click **Generate** per page.
 
 ---
 
-## 5. Inputs & outputs
+## 6. Inputs & outputs
 
-### Data inputs (read-only, from SSMS)
-18 tables incl. `[PTNT DIM]`, `[DRUG DIM]`, `[DX DIM]`, `[PHSY DIM]`, `[PLAN]`, `[PX DIM]`,
-`[DX CLM]`, `[RX CLM]`, `[PX  CLM]` *(two spaces)*, `[PTNT ACT]`, `[PTNT_MPD]`, `[NEW_PTNT]`,
-`Fact_Sx`, `Fact_Drug_Switches`, `Fact_Insurance_Claims`, `Fact_Marketing`.
-Revenue = `PLAN_PAY + PATIENT_PAY` on `[RX CLM]`. Table names contain spaces → always
-`[bracketed]` in SQL.
+### Data the app READS (never modifies)
+18 SSMS tables incl. `[PTNT DIM]`, `[DRUG DIM]`, `[DX DIM]`, `[PHSY DIM]`, `[PLAN]`,
+`[PX DIM]`, `[DX CLM]`, `[RX CLM]`, `[PX  CLM]` *(two spaces!)*, `[PTNT ACT]`, `[PTNT_MPD]`,
+`[NEW_PTNT]`, `Fact_Sx`, `Fact_Drug_Switches`, `Fact_Insurance_Claims`, `Fact_Marketing`.
+Revenue = `PLAN_PAY + PATIENT_PAY` on `[RX CLM]`, anti-seizure medicines only.
+Seizure cohort = patients with an epilepsy (G40.\*) or seizure-symptom (R56.\*) diagnosis,
+or an anti-seizure prescription (BB_USC_CODE 72110/72120/72130/72140).
 
-### Outputs (written by the app — only to its own 6 agent tables)
+### Data the app WRITES (only its own 6 tables, auto-created)
 `Agent_Pending_Actions`, `Agent_Business_Actions`, `Agent_Appointments`,
-`Agent_Notifications`, `Agent_Audit_Log`, `Agent_Chat_History` — created automatically at
-startup. The app **never writes to your source claims/dimension tables** (the agent's SQL tool
-is SELECT-only and blocks INSERT/UPDATE/DELETE/DDL). All rows are timestamped in **UTC**.
+`Agent_Notifications`, `Agent_Audit_Log`, `Agent_Chat_History` — all rows UTC-timestamped.
+The agent's SQL tool is SELECT-only (write/DDL statements are blocked).
 
-### Expected runtime inputs (what you interact with)
-- Sidebar: page navigation, the two autonomy toggles, **Refresh Data from SSMS**.
-- Per page: date-range slicers, chart clicks (cross-filter), dropdown filters
-  (insurer / specialty / state / patient), ✨ Generate insight buttons.
-- Approvals: **Approve & Execute** / **Queue for review** on opportunity cards;
-  **Approve / Reject** in the Action Center.
-- Free-text questions to the AI Strategy Agent and the AI Switch Analyst.
+### What you interact with at runtime
+Sidebar navigation + autonomy toggles + "Refresh Data from SSMS" · per-section date
+slicers · chart clicks (cross-filter) · dropdown filters (insurer / specialty / state /
+patient) · ✨ Generate-insight buttons · Approve / Queue / Reject buttons · free-text
+questions to the AI Strategy Agent and AI Switch Analyst.
 
 ---
 
-## 6. Privacy by design
+## 7. Privacy by design
 
-- Patients are identified **only by Patient ID** — no name columns exist in the data.
+- Seizure patients are identified **only by Patient ID** — no name columns exist in the data.
 - Notifications go to de-identified aliases (`patient_<id>@notify.pharma`) unless SMTP is set.
 - Physician names *are* used (legitimate commercial targeting).
-- The agent's SQL layer rejects write statements and returns max 200 rows per query.
+- The agent's SQL layer rejects write statements and caps results at 200 rows.
 
 ---
 
-## 7. Limitations
+## 8. Limitations
 
-- **SSMS only** — no local/offline mode; if SQL Server is down the app stops at startup.
+- **SQL Server only** — no local/offline mode; if the database is unreachable the app stops
+  at startup with a clear error.
 - **AI features need a Claude API key** and consume API credits per insight/chat/scan.
-- The dataset ends in 2025 — "active/adherent" logic anchors to the latest fill date (or the
-  end of your selected date window), not to today's date.
-- Emails are **simulated** unless SMTP is configured (recorded in `Agent_Notifications`).
-- Chart cross-filter supports **one active dimension per section** at a time (by design,
-  keeps the story readable).
-- Insight panels & their opportunity cards live in the browser session — refreshing the tab
-  regenerates or clears them (approved/queued items persist in the DB).
-- The agent chat is capped at 12 tool-use turns per question; very broad questions can hit
-  the limit — ask narrower questions.
-- Historical rows written before the UTC change keep their original (local-time) timestamps.
+- The dataset ends in 2025 — "active/adherent" anchors to the latest fill date (or the end of
+  your selected date window), not to today's date.
+- E-mails are **simulated** unless SMTP is configured (recorded in `Agent_Notifications`).
+- Chart cross-filter supports **one active dimension per section** at a time (by design).
+- Insight panels & opportunity cards live in the browser session — refreshing regenerates or
+  clears them (approved/queued items persist in the database).
+- The chat agent is capped at 12 tool-use turns per question — ask narrower questions if it
+  hits the limit.
+- Rows written before the UTC change keep their original (local-time) timestamps.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `Database not reachable` at startup | Run `python test_connection.py`. Check `.env` server/database, SQL Server running, TCP/IP enabled (SQL Server Configuration Manager), firewall, credentials. |
-| `pyodbc` install/driver errors | Install **ODBC Driver 18 (or 17) for SQL Server** from Microsoft; re-run the test script — step [1] lists detected drivers. |
-| `AttributeError: module 'backend' has no attribute ...` after pulling new code | The running server holds a stale module. The app **self-heals on page refresh** (guard at the top of `app.py`). If it persists: stop Streamlit, `Remove-Item -Recurse __pycache__`, restart. |
-| 🟠 *Claude API key not set* in sidebar | Put a real key in `.env` (`ANTHROPIC_API_KEY=sk-ant-...`) and restart. Placeholders `xyz`/`changeme` are treated as unset. |
-| AI errors: *Invalid API key / rate limited / network* | Shown inline by the agent — check the key, wait and retry, or check proxy/connectivity. |
+| `Database not reachable` at startup | Run `python test_connection.py`. Check `.env` server/database name, SQL Server running, TCP/IP enabled, firewall, credentials (§3). |
+| `pyodbc` / driver errors | Install **ODBC Driver 18 (or 17) for SQL Server** from Microsoft; the test script's step [1] lists detected drivers. |
+| *"server not found / named pipes error"* when DB is on another machine | Other machine off/asleep, different network, TCP/IP not enabled, or firewall — try `ping <that IP>` first (§3 Option C). |
+| *"Login failed for user"* | Mixed-mode authentication not enabled (or SQL Server not restarted after enabling); wrong username/password. |
+| `AttributeError: module 'backend' has no attribute ...` after pulling new code | Stale module in the running server — the app **self-heals on browser refresh**. If it persists: stop Streamlit, delete `__pycache__`, restart. |
+| 🟠 *Claude API key not set* in sidebar | Put a real key in `.env` (`ANTHROPIC_API_KEY=sk-ant-...`). Placeholders like `xyz` are treated as unset. |
+| AI errors: invalid key / rate limited / network | Shown inline — check the key, wait and retry, or check connectivity/proxy. |
 | Port 8501 busy | `streamlit run app.py --server.port 8502` |
 | Charts empty after narrowing the date slicer | No rows in that window — widen the range or hit ✖ Clear on the cross-filter chip. |
-| Queued action "missing" | Check the correct tab in ⚡ Action Center: patient actions vs **🏢 Business Actions**. With Autonomous Mode ON, low-risk items are auto-executed → see **📜 History**. |
+| Queued action "missing" | Check the right Action Center tab — patient vs **🏢 Business Actions**. With Autonomous Mode ON, low-risk items auto-execute → see **📜 History**. |
 | Websocket reconnect errors | `uvicorn` is pinned `<0.44` in `requirements.txt` on purpose — don't upgrade it. |
-| Refreshed data not showing | Sidebar → **🔄 Refresh Data from SSMS** (clears cached insights and re-runs the Watchdog). |
+| New SSMS rows not showing | Sidebar → **🔄 Refresh Data from SSMS**. |
 
 ---
 
-## 9. Project structure
+## 10. Project structure
 
 ```
 ├── app.py                    # Streamlit UI — 8 pages, dashboard slicers, cross-filters, AI panels
 ├── agent.py                  # Claude tool-use agent (writes/runs its own T-SQL, proposes actions)
-├── ai_engine.py              # Claude client + structured page-insight generation (JSON schema)
+├── ai_engine.py              # Claude client + structured page-insight generation (seizure-first prompts)
 ├── actions.py                # Action queue + executors + notifications + audit (human-approved)
 ├── agent_watchdog.py         # Always-on reflex layer (safety / denials / untreated) + Autopilot
-├── backend.py                # All analytics SQL (date-filterable, patient-ID only)
+├── backend.py                # All analytics SQL (seizure-cohort scoped, date-filterable, ID-only)
 ├── db.py                     # SQL Server access layer + agent tables (UTC timestamps)
 ├── config.py                 # .env loader — nothing hard-coded
 ├── scheduler.py              # Daily 08:00 autonomous cycle (or --once)
-├── test_connection.py        # Pre-flight SSMS connectivity check — run this first
+├── test_connection.py        # Pre-flight database check — run this first
 ├── requirements.txt          # streamlit, pandas, plotly, anthropic, pyodbc, schedule, ...
 ├── assets/logo.jpg           # Branding asset
-└── .env                      # API key, DB, SMTP settings (never commit real secrets)
+└── .env                      # YOU create this — API key, DB, SMTP (never committed; see §2 Step 3)
 ```

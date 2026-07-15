@@ -3,7 +3,8 @@
  (Intelligent Patient Journey Analyser & Pharma Strategy Agent)
  Complete Implementation Documentation
 ═══════════════════════════════════════════════════════════════════════════════
- Version : 3.0 (Agentic, Claude-powered, dashboard-grade interactivity)
+ Version : 3.1 (Agentic, Claude-powered, dashboard-grade interactivity,
+           seizure-cohort-scoped KPIs & seizure-first AI responses)
  Stack   : Python · Streamlit · Plotly · Anthropic Claude API · SQL Server
            (SSMS, live only — no local fallback) · pyodbc
  Identity: OUR COMPANY = EISAI (hero brands BANZEL, FYCOMPA).
@@ -49,6 +50,11 @@ Guiding principles implemented everywhere:
     displayed in UTC (SYSUTCDATETIME), labeled "(UTC)" in the UI.
   • PLAIN LANGUAGE — every chart carries a caption a non-medical business
     reader understands; the AI is instructed to explain jargon inline.
+  • SEIZURE-FIRST — SIGMA has "Seizure" in its name for a reason. Every number
+    on every page is scoped to the seizure/epilepsy cohort (never a general
+    population), and the AI is instructed (system prompt) to frame every
+    headline, insight and recommendation around seizure patients FIRST, then
+    the business/physician action that follows.
 
 
 ───────────────────────────────────────────────────────────────────────────────
@@ -109,7 +115,10 @@ Guiding principles implemented everywhere:
    WHAT: Claude client; INSIGHT_SCHEMA (strict JSON schema for opportunity
          cards); generate_page_insight(page, live_data) → validated JSON.
          System prompt carries the EISAI identity, the plain-language rule,
-         and the privacy rule.
+         the privacy rule, and the SEIZURE-FIRST rule (lead every response
+         with seizure-patient impact, say "seizure patients"/"anti-seizure
+         medicines" explicitly, then suggest the action). agent.py inherits
+         this prompt, so the chat agent follows the same rule.
    WHY : structured outputs (json_schema) guarantee the model's answer is
          machine-executable — each option carries action_type + targets, so a
          click can execute it. No fragile text parsing.
@@ -196,6 +205,10 @@ Guiding principles implemented everywhere:
    Agent_Notifications · Agent_Audit_Log · Agent_Chat_History
 
  KEY DERIVED DEFINITIONS (shared by SQL and the AI)
+   SEIZURE COHORT       = patients with an epilepsy (G40.*) or seizure-symptom
+                          (R56.*) diagnosis OR an anti-seizure prescription —
+                          this (not the raw patient dimension) is what every
+                          executive KPI counts
    Confirmed epilepsy   = any cohort G40.* code in [DX CLM]
    Contexts (severity)  = seizure duration encoded in the code:
                           EPILEPTIC (<2 min) · PROLONGED (2–5 min) ·
@@ -234,17 +247,29 @@ Guiding principles implemented everywhere:
    interaction.
 
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ PAGE 1 · EXECUTIVE COMMAND CENTER          Agent: "Chief-of-Staff Agent" │
+│ PAGE 1 · EXECUTIVE COMMAND CENTER — SEIZURE & EPILEPSY PATIENTS          │
+│                                            Agent: "Chief-of-Staff Agent" │
 └──────────────────────────────────────────────────────────────────────────┘
- KPI cards: Total Patients · Total Sales · On Active Therapy ·
-            Diagnosed-Not-Treated · Possibly Undiagnosed (green = pipeline) ·
-            Denied Claims — every card has a hover tooltip in plain English.
- GRAPH: Sales trend (Quarterly bars / Monthly area, $ labels on bars)
+ EVERY number on this page counts ONLY the seizure cohort & anti-seizure
+ medicines (explicit ASM drug filter in every KPI query — stays correct even
+ if non-seizure drugs are ever loaded).
+ KPI cards (each with a ONE-LINE hover description):
+   Seizure Patients (the cohort, e.g. 7,343 — never the raw 10,000 patient
+   dimension) · Seizure-Med Sales · On Seizure Therapy · Diagnosed-Not-
+   Treated · Possibly Undiagnosed (green = pipeline) · Denied Seizure-Med
+   Claims.
+ COUNT RECONCILIATION LINE ("How the numbers add up") under the cards,
+   computed live: cohort = diagnosed + suspected; diagnosed = untreated +
+   treated; treated = active today + lapsed/stopped (the lapsed group has no
+   card — it appears in the Treatment funnel); denied claims are insurance
+   transactions, not extra patients.
+ GRAPH: Seizure-medicine sales trend (Quarterly bars / Monthly area, $ labels)
    CROSS-FILTER: click a quarter/month → whole page focuses on that period.
- GRAPH: Patients by Medicine Category (horizontal bars, friendly names)
+ GRAPH: Seizure Patients by Medicine Category (horizontal bars, friendly names)
    CROSS-FILTER: click a category → sales trend filters to that drug class.
- EXPANDERS: possibly-undiagnosed / denied claims / untreated worklists with
-   one-click "queue outreach/escalation" buttons (land in Action Center).
+ EXPANDERS: possibly-undiagnosed / denied seizure-med claims / untreated
+   worklists with one-click "queue outreach/escalation" buttons (land in
+   Action Center).
 
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ PAGE 2 · PATIENT JOURNEY EXPLORER            Agent: "Care-Journey Agent" │
